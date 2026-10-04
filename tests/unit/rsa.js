@@ -1,4 +1,5 @@
 var ASSERT = require('assert');
+var ASN1 = require('../../lib/asn1');
 var FORGE = require('../../lib/forge');
 var JSBN = require('../../lib/jsbn');
 var MD = require('../../lib/md.all');
@@ -774,6 +775,102 @@ var UTIL = require('../../lib/util');
         });
       }
     })();
+
+    describe('DigestAlgorithm NULL parameters', function() {
+      // These fixtures use the existing synthetic private key to exercise the
+      // parser. They do not demonstrate forgery without a private key.
+      var privateKey = PKI.privateKeyFromPem(_pem.privateKey);
+      var publicKey = PKI.publicKeyFromPem(_pem.publicKey);
+      var md = MD.sha256.create();
+      md.update('DigestAlgorithm NULL parameter regression');
+      var digest = md.digest().getBytes();
+
+      function signature(parameters, transform) {
+        var algorithm = [ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.OID,
+          false, ASN1.oidToDer('2.16.840.1.101.3.4.2.1').getBytes())];
+        if(parameters !== undefined) {
+          algorithm.push(ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.NULL,
+            false, parameters));
+        }
+        var info = ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.SEQUENCE,
+          true, [
+            ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.SEQUENCE,
+              true, algorithm),
+            ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.OCTETSTRING,
+              false, digest)
+          ]);
+        var encoded = ASN1.toDer(info).getBytes();
+        if(transform) {
+          encoded = transform(encoded);
+        }
+        return RSA.encrypt(encoded, privateKey, 0x01);
+      }
+
+      it('should accept absent NULL parameters for SHA-256', function() {
+        ASSERT.strictEqual(publicKey.verify(digest, signature()), true);
+      });
+
+      it('should accept empty NULL parameters for SHA-256', function() {
+        ASSERT.strictEqual(publicKey.verify(digest, signature('')), true);
+      });
+
+      it('should reject nonempty NULL parameters for SHA-256', function() {
+        [1, 8, 32].forEach(function(length) {
+          var invalid = signature(UTIL.fillString('x', length));
+          ASSERT.throws(function() {
+            publicKey.verify(digest, invalid);
+          }, /^Error: ASN.1 object does not contain a valid RSASSA-PKCS1-v1_5 DigestInfo value.$/);
+        });
+      });
+
+      it('should reject a different digest with empty NULL parameters', function() {
+        ASSERT.strictEqual(publicKey.verify(UTIL.fillString('\x00', 32),
+          signature('')), false);
+      });
+
+      it('should accept BER indefinite-length DigestInfo with empty NULL', function() {
+        // RFC 8017 section 9.2 note 2 permits legacy BER verification.
+        var berSignature = signature('', function(encoded) {
+          ASSERT.strictEqual(encoded.charCodeAt(0), 0x30);
+          ASSERT.ok(encoded.charCodeAt(1) < 0x80);
+          return '\x30\x80' + encoded.slice(2) + '\x00\x00';
+        });
+        ASSERT.strictEqual(publicKey.verify(digest, berSignature), true);
+      });
+
+      it('should preserve PSS verification', function() {
+        var pss = PSS.create({
+          md: MD.sha256.create(),
+          mgf: MGF.mgf1.create(MD.sha256.create()),
+          saltLength: 20
+        });
+        var pssMd = MD.sha256.create();
+        pssMd.update('DigestAlgorithm NULL parameter regression');
+        var pssSignature = privateKey.sign(pssMd, pss);
+        ASSERT.strictEqual(publicKey.verify(digest, pssSignature, pss), true);
+      });
+
+      it('should preserve NONE verification', function() {
+        var rawSignature = privateKey.sign(digest, 'NONE');
+        ASSERT.strictEqual(publicKey.verify(digest, rawSignature, 'NONE'), true);
+        ASSERT.strictEqual(publicKey.verify(UTIL.fillString('\x00', 32),
+          rawSignature, 'NONE'), false);
+      });
+
+      it('should accept a native signature and reject a wrong digest', function() {
+        if(!UTIL.isNodejs) {
+          this.skip();
+          return;
+        }
+        var crypto = require('crypto');
+        var signer = crypto.createSign('RSA-SHA256');
+        signer.update('DigestAlgorithm NULL parameter regression');
+        var nativeSignature = signer.sign(_pem.privateKey, 'binary');
+        ASSERT.strictEqual(publicKey.verify(digest, nativeSignature), true);
+        ASSERT.strictEqual(publicKey.verify(UTIL.fillString('\x00', 32),
+          nativeSignature), false);
+      });
+    });
 
     describe('signature verification', function() {
 
