@@ -54,6 +54,85 @@ var UTIL = require('../../lib/util');
       );
     });
 
+    [
+      ['00', '0.0'], ['27', '0.39'], ['28', '1.0'], ['4f', '1.39'],
+      ['50', '2.0'], ['77', '2.39'], ['78', '2.40'], ['7f', '2.47'],
+      ['8100', '2.48'], ['883703', '2.999.3'],
+      ['8fffffffffffff7f', '2.9007199254740911'],
+      ['2a00', '1.2.0'], ['2a8fffffffffffff7f', '1.2.9007199254740991']
+    ].forEach(function(vector) {
+      it('should decode canonical OID ' + vector[1], function() {
+        var der = UTIL.hexToBytes(vector[0]);
+        ASSERT.equal(ASN1.derToOid(der), vector[1]);
+        var buffer = UTIL.createBuffer('\x00' + der);
+        buffer.getByte();
+        ASSERT.equal(ASN1.derToOid(buffer), vector[1]);
+        ASSERT.equal(buffer.length(), 0);
+        ASSERT.equal(buffer.read, der.length + 1);
+        var data = new Uint8Array(der.length + 1);
+        for(var i = 0; i < der.length; ++i) {
+          data[i + 1] = der.charCodeAt(i);
+        }
+        var dataBuffer = new UTIL.DataBuffer(data);
+        dataBuffer.getByte();
+        ASSERT.equal(ASN1.derToOid(dataBuffer), vector[1]);
+        ASSERT.equal(dataBuffer.length(), 0);
+        ASSERT.equal(dataBuffer.read, der.length + 1);
+      });
+    });
+
+    ['', '80', '8000', '802a', '81', '8180', '2a80', '2a81',
+      '2a8000', '2a808648', '2a0180', '2a008000'].forEach(function(hex) {
+      it('should reject malformed OID octets ' + hex, function() {
+        var der = UTIL.hexToBytes(hex);
+        ASSERT.throws(function() {
+          ASN1.derToOid(der);
+        }, /^Error: Invalid OID encoding\.$/);
+        var buffer = UTIL.createBuffer('\x00' + der);
+        buffer.getByte();
+        ASSERT.throws(function() {
+          ASN1.derToOid(buffer);
+        }, /^Error: Invalid OID encoding\.$/);
+        var data = new Uint8Array(der.length + 1);
+        for(var i = 0; i < der.length; ++i) {
+          data[i + 1] = der.charCodeAt(i);
+        }
+        var dataBuffer = new UTIL.DataBuffer(data);
+        dataBuffer.getByte();
+        ASSERT.throws(function() {
+          ASN1.derToOid(dataBuffer);
+        }, /^Error: Invalid OID encoding\.$/);
+      });
+    });
+
+    ['\u0100', '\x2a\u0100', '\x2a\u0180', '\uffff', '\x2a\uffff']
+      .forEach(function(der, index) {
+        it('should reject non-byte OID code units ' + index, function() {
+          ASSERT.throws(function() {
+            ASN1.derToOid(der);
+          }, /^Error: Invalid OID encoding\.$/);
+          ASSERT.throws(function() {
+            ASN1.derToOid(UTIL.createBuffer(der));
+          }, /^Error: Invalid OID encoding\.$/);
+        });
+      });
+
+    [UTIL.createBuffer(), new UTIL.DataBuffer(new Uint8Array(0))]
+      .forEach(function(buffer, index) {
+        it('should reject an over-consumed OID buffer ' + index, function() {
+          buffer.read = 1;
+          ASSERT.throws(function() {
+            ASN1.derToOid(buffer);
+          }, /^Error: Invalid OID encoding\.$/);
+        });
+      });
+
+    it('should bound the combined first OID subidentifier to 53 bits', function() {
+      ASSERT.throws(function() {
+        ASN1.derToOid(UTIL.hexToBytes('9080808080808000'));
+      }, /^Error: OID value too large; max is 53-bits\.$/);
+    });
+
     it('should convert INTEGER 0 to DER', function() {
       ASSERT.equal(ASN1.integerToDer(0).toHex(), '00');
     });

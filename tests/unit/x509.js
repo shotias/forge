@@ -254,6 +254,19 @@ var UTIL = require('../../lib/util');
   };
 
   describe('x509', function() {
+    ['', '\x80\x2a', '\x2a\x80'].forEach(function(oid, index) {
+      it('should reject malformed certificate metadata OID ' + index, function() {
+        var certificate = PKI.certificateFromPem(_pem_sha256.certificate);
+        var obj = PKI.certificateToAsn1(certificate);
+        // The outer signature AlgorithmIdentifier is certificate metadata,
+        // independent of the RSA signature's encoded DigestInfo.
+        obj.value[1].value[0].value = oid;
+        ASSERT.throws(function() {
+          PKI.certificateFromAsn1(obj);
+        }, /^Error: Invalid OID encoding\.$/);
+      });
+    });
+
     it('should convert SHA-1 based certificate to/from PEM', function() {
       var certificate = PKI.certificateFromPem(_pem.certificate);
       ASSERT.equal(PKI.certificateToPem(certificate), _pem.certificate);

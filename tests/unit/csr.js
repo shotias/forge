@@ -27,6 +27,21 @@ var PKI = require('../../lib/pki');
   };
 
   describe('csr', function() {
+    ['', '\x80\x2a', '\x2a\x80'].forEach(function(oid, index) {
+      it('should reject malformed CSR metadata OID ' + index, function() {
+        var csr = PKI.createCertificationRequest();
+        csr.publicKey = PKI.publicKeyFromPem(_pem.publicKey);
+        csr.setSubject([{name: 'commonName', value: 'example.org'}]);
+        csr.sign(PKI.privateKeyFromPem(_pem.privateKey));
+        var obj = PKI.certificationRequestToAsn1(csr);
+        // Mutate the CSR's signature AlgorithmIdentifier, not its DigestInfo.
+        obj.value[1].value[0].value = oid;
+        ASSERT.throws(function() {
+          PKI.certificationRequestFromAsn1(obj);
+        }, /^Error: Invalid OID encoding\.$/);
+      });
+    });
+
     it('should generate a certification request', function() {
       var keys = {
         privateKey: PKI.privateKeyFromPem(_pem.privateKey),

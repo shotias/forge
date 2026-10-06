@@ -1,4 +1,5 @@
 var ASSERT = require('assert');
+var ASN1 = require('../../lib/asn1');
 var FORGE = require('../../lib/forge');
 var JSBN = require('../../lib/jsbn');
 var MD = require('../../lib/md.all');
@@ -775,6 +776,102 @@ var UTIL = require('../../lib/util');
       }
     })();
 
+    describe('DigestAlgorithm NULL parameters', function() {
+      // These fixtures use the existing synthetic private key to exercise the
+      // parser. They do not demonstrate forgery without a private key.
+      var privateKey = PKI.privateKeyFromPem(_pem.privateKey);
+      var publicKey = PKI.publicKeyFromPem(_pem.publicKey);
+      var md = MD.sha256.create();
+      md.update('DigestAlgorithm NULL parameter regression');
+      var digest = md.digest().getBytes();
+
+      function signature(parameters, transform) {
+        var algorithm = [ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.OID,
+          false, ASN1.oidToDer('2.16.840.1.101.3.4.2.1').getBytes())];
+        if(parameters !== undefined) {
+          algorithm.push(ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.NULL,
+            false, parameters));
+        }
+        var info = ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.SEQUENCE,
+          true, [
+            ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.SEQUENCE,
+              true, algorithm),
+            ASN1.create(ASN1.Class.UNIVERSAL, ASN1.Type.OCTETSTRING,
+              false, digest)
+          ]);
+        var encoded = ASN1.toDer(info).getBytes();
+        if(transform) {
+          encoded = transform(encoded);
+        }
+        return RSA.encrypt(encoded, privateKey, 0x01);
+      }
+
+      it('should accept absent NULL parameters for SHA-256', function() {
+        ASSERT.strictEqual(publicKey.verify(digest, signature()), true);
+      });
+
+      it('should accept empty NULL parameters for SHA-256', function() {
+        ASSERT.strictEqual(publicKey.verify(digest, signature('')), true);
+      });
+
+      it('should reject nonempty NULL parameters for SHA-256', function() {
+        [1, 8, 32].forEach(function(length) {
+          var invalid = signature(UTIL.fillString('x', length));
+          ASSERT.throws(function() {
+            publicKey.verify(digest, invalid);
+          }, /^Error: ASN.1 object does not contain a valid RSASSA-PKCS1-v1_5 DigestInfo value.$/);
+        });
+      });
+
+      it('should reject a different digest with empty NULL parameters', function() {
+        ASSERT.strictEqual(publicKey.verify(UTIL.fillString('\x00', 32),
+          signature('')), false);
+      });
+
+      it('should accept BER indefinite-length DigestInfo with empty NULL', function() {
+        // RFC 8017 section 9.2 note 2 permits legacy BER verification.
+        var berSignature = signature('', function(encoded) {
+          ASSERT.strictEqual(encoded.charCodeAt(0), 0x30);
+          ASSERT.ok(encoded.charCodeAt(1) < 0x80);
+          return '\x30\x80' + encoded.slice(2) + '\x00\x00';
+        });
+        ASSERT.strictEqual(publicKey.verify(digest, berSignature), true);
+      });
+
+      it('should preserve PSS verification', function() {
+        var pss = PSS.create({
+          md: MD.sha256.create(),
+          mgf: MGF.mgf1.create(MD.sha256.create()),
+          saltLength: 20
+        });
+        var pssMd = MD.sha256.create();
+        pssMd.update('DigestAlgorithm NULL parameter regression');
+        var pssSignature = privateKey.sign(pssMd, pss);
+        ASSERT.strictEqual(publicKey.verify(digest, pssSignature, pss), true);
+      });
+
+      it('should preserve NONE verification', function() {
+        var rawSignature = privateKey.sign(digest, 'NONE');
+        ASSERT.strictEqual(publicKey.verify(digest, rawSignature, 'NONE'), true);
+        ASSERT.strictEqual(publicKey.verify(UTIL.fillString('\x00', 32),
+          rawSignature, 'NONE'), false);
+      });
+
+      it('should accept a native signature and reject a wrong digest', function() {
+        if(!UTIL.isNodejs) {
+          this.skip();
+          return;
+        }
+        var crypto = require('crypto');
+        var signer = crypto.createSign('RSA-SHA256');
+        signer.update('DigestAlgorithm NULL parameter regression');
+        var nativeSignature = signer.sign(_pem.privateKey, 'binary');
+        ASSERT.strictEqual(publicKey.verify(digest, nativeSignature), true);
+        ASSERT.strictEqual(publicKey.verify(UTIL.fillString('\x00', 32),
+          nativeSignature), false);
+      });
+    });
+
     describe('signature verification', function() {
 
       // NOTE: Tests in this section, and associated fixes, are largely derived
@@ -1156,6 +1253,37 @@ var UTIL = require('../../lib/util');
           '3e63de8f80d7f3cbfecb03cbb44ac4a2d56699e33fca0663b79ca627755fc4fc' +
           '684b4ab358a0b4ac5b7e9d0cc18b6ab6300b40781502a1c03d34f31dd19d8119' +
           '5f8a44bc03a2595a706f06f0cb39b8e3f4afe06675fe7439b057f1200a06f4fd');
+
+        _checkBadDigestInfo(publicKey, S);
+      });
+
+      it('should check nested DigestAlgorithm element count', function() {
+        var publicKey = RSA.setPublicKey(N, e);
+        // garbage OCTET STRING injected as an extra, unconsumed child of the
+        // nested DigestInfo.DigestAlgorithm SEQUENCE (after the OID and
+        // NULL). The GHSA-ppp5-5v6c-4jwp / CVE-2026-33894 fix only checks the
+        // element count of the outer DigestInfo SEQUENCE, so this nested
+        // garbage previously passed validation and could be used to forge
+        // signatures for low public exponent keys (e.g. e=3). See #1149 /
+        // CVE-2026-85393.
+        var I = UTIL.binary.hex.decode(
+          '0001ffffffffffffffff003081f23081cd060960864801650304020105000481bd88' +
+          '88888888888888888888888888888888888888888888888888888888888888888888' +
+          '88888888888888888888888888888888888888888888888888888888888888888888' +
+          '88888888888888888888888888888888888888888888888888888888888888888888' +
+          '88888888888888888888888888888888888888888888888888888888888888888888' +
+          '88888888888888888888888888888888888888888888888888888888888888888888' +
+          '88888888888888888888888888888888888804207509e5bda0c762d2bac7f90d758b' +
+          '5b2263fa01ccbc542ab5e3df163be08e6ca9');
+        var S = UTIL.binary.hex.decode(
+          'a4ae63dd5e7712b78f4870d0f51e294df5503d4f16c5d27ae33370981fb57f0de49f' +
+          '50f3d6a04666774cd984cd13972db9bf8e12bd294ef0ddc916c7c86cbae63efd7b6b' +
+          '97885e69760c208a40f1aecc76a90d7af5145177efce1bb55807a8d05c20b1596753' +
+          'ba710642fc9acdde6c160232654662c77cc4466c8257a38edb49f894e8845d0fd987' +
+          'b857ced88f4b62505a080bd87ef700d35d392a6e8f6fde34250c50b86fae606cb551' +
+          '215e8f4813239b77651d5565ad453698c071d48c31e8e526fb4a37610f64b3e1fb8e' +
+          '5be5898e408ad08197a0947794a530b54f84485377ce4a7488ed485ce4e5e105dd89' +
+          '698a472f390c3b1b76bc16b73276c4d1c81d');
 
         _checkBadDigestInfo(publicKey, S);
       });

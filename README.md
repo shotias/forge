@@ -1,5 +1,8 @@
 # Forge
 
+> Maintenance fork: see [FORK.md](FORK.md) for provenance, the bounded security
+> correction, verification instructions and support limitations.
+
 [![NPM](https://nodei.co/npm/node-forge.svg?data=d)](https://nodei.co/npm/node-forge/)
 
 [![Main Checks](https://github.com/digitalbazaar/forge/actions/workflows/main.yaml/badge.svg)](https://github.com/digitalbazaar/forge/actions/workflows/main.yaml)
