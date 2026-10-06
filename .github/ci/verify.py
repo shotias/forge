@@ -2,6 +2,7 @@
 """Build committed source and check the isolated Node test reports."""
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -22,24 +23,56 @@ expected_pending = sorted(
 )
 
 
-def run(args, data=None):
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        result = subprocess.run(args, cwd=root, input=data, stdout=stdout,
-                                stderr=stderr, timeout=300)
-        stdout.seek(0)
-        stderr.seek(0)
-        out = stdout.read(16 * 1024 * 1024 + 1)
-        err = stderr.read(1024 * 1024 + 1)
-    assert len(out) <= 16 * 1024 * 1024 and len(err) <= 1024 * 1024, "Output limit exceeded"
-    report["commands"].append({
-        "argv": args, "exit_code": result.returncode,
-        "stdout_sha256": hashlib.sha256(out).hexdigest(),
-        "stderr_sha256": hashlib.sha256(err).hexdigest(),
-    })
-    if err:
-        print(err.decode("utf-8", errors="replace"), file=sys.stderr)
-    assert result.returncode == 0, "Command failed: " + args[0]
-    return out
+def run(args, data=None, timeout=300):
+    cidfile = None
+    if args[:2] == ["docker", "run"]:
+        cidfile = output / ("container-" + str(len(report["commands"])) + ".cid")
+        args = args[:2] + ["--cidfile", str(cidfile)] + args[2:]
+    record = {"argv": args, "exit_code": None}
+    report["commands"].append(record)
+    command_error = None
+    try:
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            result = subprocess.run(args, cwd=root, input=data, stdout=stdout,
+                                    stderr=stderr, timeout=timeout)
+            stdout.seek(0)
+            stderr.seek(0)
+            out = stdout.read(16 * 1024 * 1024 + 1)
+            err = stderr.read(1024 * 1024 + 1)
+        record.update({
+            "exit_code": result.returncode,
+            "stdout_sha256": hashlib.sha256(out).hexdigest(),
+            "stderr_sha256": hashlib.sha256(err).hexdigest(),
+        })
+        assert len(out) <= 16 * 1024 * 1024 and len(err) <= 1024 * 1024, "Output limit exceeded"
+        if err:
+            print(err.decode("utf-8", errors="replace"), file=sys.stderr)
+        assert result.returncode == 0, "Command failed: " + args[0]
+        return out
+    except Exception as error:
+        command_error = error
+        record["error_type"] = type(error).__name__
+        raise
+    finally:
+        if cidfile is not None:
+            cleanup = {"cidfile": str(cidfile), "result": "FAIL"}
+            record["cleanup"] = cleanup
+            try:
+                # Only the exact ID emitted by this invocation may be removed.
+                cid = cidfile.read_text().strip()
+                assert re.fullmatch("[0-9a-f]{64}", cid), "Invalid owned container ID"
+                cleanup["container_id"] = cid
+                result = subprocess.run(["docker", "rm", "--force", cid],
+                                        capture_output=True, timeout=30)
+                cleanup["exit_code"] = result.returncode
+                assert result.returncode == 0, "Owned container cleanup failed"
+                cleanup["result"] = "REMOVED"
+            except Exception as error:
+                cleanup["error_type"] = type(error).__name__
+                print("Owned container cleanup failed: " + type(error).__name__,
+                      file=sys.stderr)
+                if command_error is None:
+                    raise
 
 
 try:
@@ -52,7 +85,7 @@ try:
          "--label", "org.opencontainers.image.revision=" + commit, "-"], archive)
     image = (output / "image.id").read_text().strip()
     report["image"] = image
-    container = ["docker", "run", "--rm", "--network=none", "--read-only",
+    container = ["docker", "run", "--network=none", "--read-only",
                  "--user", "10001:10001", "--cap-drop=ALL",
                  "--security-opt=no-new-privileges", "--memory=1g", "--cpus=2",
                  "--pids-limit=128", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m", image]
